@@ -196,6 +196,11 @@ func (cli *Client) Enroll(c net.Conn) (Conn, error) {
 				return nil, err
 			}
 		}
+		if cli.opts.TCPLinger < 0 {
+			if err = socket.SetLinger(dupFD, cli.opts.TCPLinger); err != nil {
+				return nil, err
+			}
+		}
 		if cli.opts.TCPKeepAlive > 0 {
 			if err = socket.SetKeepAlivePeriod(dupFD, int(cli.opts.TCPKeepAlive.Seconds())); err != nil {
 				return nil, err

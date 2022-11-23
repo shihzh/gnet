@@ -123,9 +123,11 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 	for {
 		n, err := unix.EpollWait(p.fd, el.events, msec)
 		if n == 0 || (n < 0 && err == unix.EINTR) {
-			msec = -1
-			runtime.Gosched()
-			continue
+			if p.asyncTaskQueue.IsEmpty() && p.urgentAsyncTaskQueue.IsEmpty() {
+				msec = -1
+				runtime.Gosched()
+				continue
+			}
 		} else if err != nil {
 			logging.Errorf("error occurs in epoll: %v", os.NewSyscallError("epoll_wait", err))
 			return err
@@ -161,10 +163,8 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 				}
 				queue.PutTask(task)
 			}
-			for i := 0; i < MaxAsyncTasksAtOneTime; i++ {
-				if task = p.asyncTaskQueue.Dequeue(); task == nil {
-					break
-				}
+			task = p.asyncTaskQueue.Dequeue()
+			for ; task != nil; task = p.asyncTaskQueue.Dequeue() {
 				switch err = task.Run(task.Arg); err {
 				case nil:
 				case errors.ErrEngineShutdown:

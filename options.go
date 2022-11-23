@@ -100,6 +100,20 @@ type Options struct {
 	// as soon as possible after a write operation.
 	TCPNoDelay TCPSocketOpt
 
+	// TCPLinger controls the behavior of Close on a connection which still
+	// has data waiting to be sent or to be acknowledged.
+	//
+	// If TCPLinger < 0 (the default), the operating system finishes sending the
+	// data in the background.
+	//
+	// If TCPLinger == 0, the operating system discards any unsent or
+	// unacknowledged data.
+	//
+	// If TCPLinger > 0, the data is sent in the background as with TCPLinger < 0. On
+	// some operating systems after TCPLinger seconds have elapsed any remaining
+	// unsent data may be discarded.
+	TCPLinger int
+
 	// SocketRecvBuffer sets the maximum socket receive buffer in bytes.
 	SocketRecvBuffer int
 
@@ -195,6 +209,13 @@ func WithTCPKeepAlive(tcpKeepAlive time.Duration) Option {
 func WithTCPNoDelay(tcpNoDelay TCPSocketOpt) Option {
 	return func(opts *Options) {
 		opts.TCPNoDelay = tcpNoDelay
+	}
+}
+
+// WithLinger enable/disable the TCP_NODELAY socket option.
+func WithLinger(tcpLinger int) Option {
+	return func(opts *Options) {
+		opts.TCPLinger = tcpLinger
 	}
 }
 
