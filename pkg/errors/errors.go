@@ -17,6 +17,8 @@ package errors
 import "errors"
 
 var (
+	// ErrEmptyEngine occurs when trying to do something with an empty engine.
+	ErrEmptyEngine = errors.New("the internal engine is empty")
 	// ErrEngineShutdown occurs when server is closing.
 	ErrEngineShutdown = errors.New("server is going to be shutdown")
 	// ErrEngineInShutdown occurs when attempting to shut the server down more than once.
@@ -39,4 +41,6 @@ var (
 	ErrUnsupportedOp = errors.New("unsupported operation")
 	// ErrNegativeSize occurs when trying to pass a negative size to a buffer.
 	ErrNegativeSize = errors.New("negative size is invalid")
+	// ErrNoIPv4AddressOnInterface occurs when an IPv4 multicast address is set on an interface but IPv4 is not configured.
+	ErrNoIPv4AddressOnInterface = errors.New("no IPv4 address on interface")
 )

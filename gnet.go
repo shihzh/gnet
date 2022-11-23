@@ -51,6 +51,10 @@ type Engine struct {
 
 // CountConnections counts the number of currently active connections and returns it.
 func (s Engine) CountConnections() (count int) {
+	if s.eng == nil {
+		return -1
+	}
+
 	s.eng.lb.iterate(func(i int, el *eventloop) bool {
 		count += int(el.loadConn())
 		return true
@@ -62,12 +66,42 @@ func (s Engine) CountConnections() (count int) {
 // It is the caller's responsibility to close dupFD when finished.
 // Closing listener does not affect dupFD, and closing dupFD does not affect listener.
 func (s Engine) Dup() (dupFD int, err error) {
+	if s.eng == nil {
+		return -1, errors.ErrEmptyEngine
+	}
+
 	var sc string
 	dupFD, sc, err = s.eng.ln.dup()
 	if err != nil {
 		logging.Warnf("%s failed when duplicating new fd\n", sc)
 	}
 	return
+}
+
+// Stop gracefully shuts down this Engine without interrupting any active event-loops,
+// it waits indefinitely for connections and event-loops to be closed and then shuts down.
+func (s Engine) Stop(ctx context.Context) error {
+	if s.eng == nil {
+		return errors.ErrEmptyEngine
+	}
+	if s.eng.isInShutdown() {
+		return errors.ErrEngineInShutdown
+	}
+
+	s.eng.signalShutdown()
+
+	ticker := time.NewTicker(shutdownPollInterval)
+	defer ticker.Stop()
+	for {
+		if s.eng.isInShutdown() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 // Reader is an interface that consists of a number of methods for reading that Conn must implement.
@@ -140,7 +174,7 @@ type Writer interface {
 // AsyncCallback is a callback which will be invoked after the asynchronous functions has finished executing.
 //
 // Note that the parameter gnet.Conn is already released under UDP protocol, thus it's not allowed to be accessed.
-type AsyncCallback func(c Conn) error
+type AsyncCallback func(c Conn, err error) error
 
 // Socket is a set of functions which manipulate the underlying file descriptor of a connection.
 type Socket interface {
@@ -278,35 +312,35 @@ type (
 
 // OnBoot fires when the engine is ready for accepting connections.
 // The parameter engine has information and various utilities.
-func (es *BuiltinEventEngine) OnBoot(_ Engine) (action Action) {
+func (*BuiltinEventEngine) OnBoot(_ Engine) (action Action) {
 	return
 }
 
 // OnShutdown fires when the engine is being shut down, it is called right after
 // all event-loops and connections are closed.
-func (es *BuiltinEventEngine) OnShutdown(_ Engine) {
+func (*BuiltinEventEngine) OnShutdown(_ Engine) {
 }
 
 // OnOpen fires when a new connection has been opened.
 // The parameter out is the return value which is going to be sent back to the peer.
-func (es *BuiltinEventEngine) OnOpen(_ Conn) (out []byte, action Action) {
+func (*BuiltinEventEngine) OnOpen(_ Conn) (out []byte, action Action) {
 	return
 }
 
 // OnClose fires when a connection has been closed.
 // The parameter err is the last known connection error.
-func (es *BuiltinEventEngine) OnClose(_ Conn, _ error) (action Action) {
+func (*BuiltinEventEngine) OnClose(_ Conn, _ error) (action Action) {
 	return
 }
 
 // OnTraffic fires when a local socket receives data from the peer.
-func (es *BuiltinEventEngine) OnTraffic(_ Conn) (action Action) {
+func (*BuiltinEventEngine) OnTraffic(_ Conn) (action Action) {
 	return
 }
 
 // OnTick fires immediately after the engine starts and will fire again
 // following the duration specified by the delay return value.
-func (es *BuiltinEventEngine) OnTick() (delay time.Duration, action Action) {
+func (*BuiltinEventEngine) OnTick() (delay time.Duration, action Action) {
 	return
 }
 
@@ -318,13 +352,14 @@ var MaxStreamBufferCap = 64 * 1024 // 64KB
 // Address should use a scheme prefix and be formatted
 // like `tcp://192.168.0.10:9851` or `unix://socket`.
 // Valid network schemes:
-//  tcp   - bind to both IPv4 and IPv6
-//  tcp4  - IPv4
-//  tcp6  - IPv6
-//  udp   - bind to both IPv4 and IPv6
-//  udp4  - IPv4
-//  udp6  - IPv6
-//  unix  - Unix Domain Socket
+//
+//	tcp   - bind to both IPv4 and IPv6
+//	tcp4  - IPv4
+//	tcp6  - IPv6
+//	udp   - bind to both IPv4 and IPv6
+//	udp4  - IPv4
+//	udp6  - IPv6
+//	unix  - Unix Domain Socket
 //
 // The "tcp" network scheme is assumed when one is not specified.
 func Run(eventHandler EventHandler, protoAddr string, opts ...Option) (err error) {
@@ -388,7 +423,7 @@ func Run(eventHandler EventHandler, protoAddr string, opts ...Option) (err error
 	}
 	defer ln.close()
 
-	return serve(eventHandler, ln, options, protoAddr)
+	return run(eventHandler, ln, options, protoAddr)
 }
 
 var (
@@ -400,6 +435,7 @@ var (
 
 // Stop gracefully shuts down the engine without interrupting any active event-loops,
 // it waits indefinitely for connections and event-loops to be closed and then shuts down.
+// Deprecated: The global Stop only shuts down the last registered Engine with the same protocol and IP:Port as the previous Engine's, which can lead to leaks of Engine if you invoke gnet.Run multiple times using the same protocol and IP:Port under the condition that WithReuseAddr(true) and WithReusePort(true) are enabled. Use Engine.Stop instead.
 func Stop(ctx context.Context, protoAddr string) error {
 	var eng *engine
 	if s, ok := allEngines.Load(protoAddr); ok {

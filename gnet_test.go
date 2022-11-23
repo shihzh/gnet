@@ -21,10 +21,12 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand"
 	"net"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -301,13 +303,13 @@ func (s *testServer) OnTraffic(c Conn) (action Action) {
 						bs := make([][]byte, 2)
 						bs[0] = buf.B[:mid]
 						bs[1] = buf.B[mid:]
-						_ = c.AsyncWritev(bs, func(c Conn) error {
-							logging.Debugf("conn=%s done writev", c.RemoteAddr().String())
+						_ = c.AsyncWritev(bs, func(c Conn, err error) error {
+							logging.Debugf("conn=%s done writev: %v", c.RemoteAddr().String(), err)
 							return nil
 						})
 					} else {
-						_ = c.AsyncWrite(buf.Bytes(), func(c Conn) error {
-							logging.Debugf("conn=%s done write", c.RemoteAddr().String())
+						_ = c.AsyncWrite(buf.Bytes(), func(c Conn, err error) error {
+							logging.Debugf("conn=%s done write: %v", c.RemoteAddr().String(), err)
 							return nil
 						})
 					}
@@ -409,6 +411,171 @@ func startClient(t *testing.T, network, addr string, multicore, async bool) {
 			)
 		}
 	}
+}
+
+// NOTE: TestServeMulticast can fail with "write: no buffer space available" on wifi interface.
+func TestServeMulticast(t *testing.T) {
+	t.Run("IPv4", func(t *testing.T) {
+		// 224.0.0.169 is an unassigned address from the Local Network Control Block
+		// https://www.iana.org/assignments/multicast-addresses/multicast-addresses.xhtml#multicast-addresses-1
+		t.Run("udp-multicast", func(t *testing.T) {
+			testMulticast(t, "224.0.0.169:9991", false, false, -1, 10)
+		})
+		t.Run("udp-multicast-reuseport", func(t *testing.T) {
+			testMulticast(t, "224.0.0.169:9991", true, false, -1, 10)
+		})
+		t.Run("udp-multicast-reuseaddr", func(t *testing.T) {
+			testMulticast(t, "224.0.0.169:9991", false, true, -1, 10)
+		})
+	})
+	t.Run("IPv6", func(t *testing.T) {
+		iface, err := findLoopbackInterface()
+		require.NoError(t, err)
+		if iface.Flags&net.FlagMulticast != net.FlagMulticast {
+			t.Skip("multicast is not supported on loopback interface")
+		}
+		// ff02::3 is an unassigned address from Link-Local Scope Multicast Addresses
+		// https://www.iana.org/assignments/ipv6-multicast-addresses/ipv6-multicast-addresses.xhtml#link-local
+		t.Run("udp-multicast", func(t *testing.T) {
+			testMulticast(t, fmt.Sprintf("[ff02::3%%%s]:9991", iface.Name), false, false, iface.Index, 10)
+		})
+		t.Run("udp-multicast-reuseport", func(t *testing.T) {
+			testMulticast(t, fmt.Sprintf("[ff02::3%%%s]:9991", iface.Name), true, false, iface.Index, 10)
+		})
+		t.Run("udp-multicast-reuseaddr", func(t *testing.T) {
+			testMulticast(t, fmt.Sprintf("[ff02::3%%%s]:9991", iface.Name), false, true, iface.Index, 10)
+		})
+	})
+}
+
+func findLoopbackInterface() (*net.Interface, error) {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil, err
+	}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagLoopback == net.FlagLoopback {
+			return &iface, nil
+		}
+	}
+	return nil, errors.New("no loopback interface")
+}
+
+func testMulticast(t *testing.T, addr string, reuseport, reuseaddr bool, index, nclients int) {
+	ts := &testMcastServer{
+		t:        t,
+		addr:     addr,
+		nclients: nclients,
+	}
+	options := []Option{
+		WithReuseAddr(reuseaddr),
+		WithReusePort(reuseport),
+		WithSocketRecvBuffer(2 * nclients * 1024), // enough space to receive messages from nclients to eliminate dropped packets
+		WithTicker(true),
+	}
+	if index != -1 {
+		options = append(options, WithMulticastInterfaceIndex(index))
+	}
+	err := Run(ts, "udp://"+addr, options...)
+	assert.NoError(t, err)
+}
+
+type testMcastServer struct {
+	*BuiltinEventEngine
+	t        *testing.T
+	mcast    sync.Map
+	addr     string
+	nclients int
+	started  int32
+	active   int32
+}
+
+func (s *testMcastServer) startMcastClient() {
+	rand.Seed(time.Now().UnixNano())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := net.Dial("udp", s.addr)
+	require.NoError(s.t, err)
+	defer c.Close()
+	ch := make(chan []byte, 10000)
+	s.mcast.Store(c.LocalAddr().String(), ch)
+	duration := time.Duration((rand.Float64()*2+1)*float64(time.Second)) / 2
+	s.t.Logf("test duration: %dms", duration/time.Millisecond)
+	start := time.Now()
+	for time.Since(start) < duration {
+		reqData := make([]byte, 1024)
+		_, err = rand.Read(reqData)
+		require.NoError(s.t, err)
+		_, err = c.Write(reqData)
+		require.NoError(s.t, err)
+		// Workaround for MacOS "write: no buffer space available" error messages
+		// https://developer.apple.com/forums/thread/42334
+		time.Sleep(time.Millisecond)
+		select {
+		case respData := <-ch:
+			require.Equalf(s.t, reqData, respData, "response mismatch, length of bytes: %d vs %d", len(reqData), len(respData))
+		case <-ctx.Done():
+			require.Fail(s.t, "timeout receiving message")
+			return
+		}
+	}
+}
+
+func (s *testMcastServer) OnTraffic(c Conn) (action Action) {
+	buf, _ := c.Next(-1)
+	b := make([]byte, len(buf))
+	copy(b, buf)
+	ch, ok := s.mcast.Load(c.RemoteAddr().String())
+	require.True(s.t, ok)
+	ch.(chan []byte) <- b
+	return
+}
+
+func (s *testMcastServer) OnTick() (delay time.Duration, action Action) {
+	if atomic.CompareAndSwapInt32(&s.started, 0, 1) {
+		for i := 0; i < s.nclients; i++ {
+			atomic.AddInt32(&s.active, 1)
+			go func() {
+				s.startMcastClient()
+				atomic.AddInt32(&s.active, -1)
+			}()
+		}
+	}
+	if atomic.LoadInt32(&s.active) == 0 {
+		action = Shutdown
+		return
+	}
+	delay = time.Second / 5
+	return
+}
+
+type testMulticastBindServer struct {
+	*BuiltinEventEngine
+}
+
+func (t *testMulticastBindServer) OnTick() (delay time.Duration, action Action) {
+	action = Shutdown
+	return
+}
+
+func TestMulticastBindIPv4(t *testing.T) {
+	ts := &testMulticastBindServer{}
+	iface, err := findLoopbackInterface()
+	require.NoError(t, err)
+	err = Run(ts, "udp://224.0.0.169:9991",
+		WithMulticastInterfaceIndex(iface.Index),
+		WithTicker(true))
+	assert.NoError(t, err)
+}
+
+func TestMulticastBindIPv6(t *testing.T) {
+	ts := &testMulticastBindServer{}
+	iface, err := findLoopbackInterface()
+	require.NoError(t, err)
+	err = Run(ts, fmt.Sprintf("udp://[ff02::3%%%s]:9991", iface.Name),
+		WithMulticastInterfaceIndex(iface.Index),
+		WithTicker(true))
+	assert.NoError(t, err)
 }
 
 func TestDefaultGnetServer(t *testing.T) {
@@ -514,8 +681,8 @@ func (t *testWakeConnServer) OnTick() (delay time.Duration, action Action) {
 		return
 	}
 	t.c = <-t.conn
-	_ = t.c.Wake(func(c Conn) error {
-		logging.Debugf("conn=%s done wake", c.RemoteAddr().String())
+	_ = t.c.Wake(func(c Conn, err error) error {
+		logging.Debugf("conn=%s done wake: %v", c.RemoteAddr().String(), err)
 		return nil
 	})
 	delay = time.Millisecond * 100
@@ -928,11 +1095,97 @@ func testStop(t *testing.T, network, addr string) {
 	assert.NoError(t, err)
 }
 
+func TestEngineStop(t *testing.T) {
+	testEngineStop(t, "tcp", ":9998")
+}
+
+type testStopEngine struct {
+	*BuiltinEventEngine
+	tester                   *testing.T
+	network, addr, protoAddr string
+	eng                      Engine
+	stopIter                 int64
+	name                     string
+	exchngCount              int64
+}
+
+func (t *testStopEngine) OnBoot(eng Engine) (action Action) {
+	t.eng = eng
+	return
+}
+
+func (t *testStopEngine) OnClose(c Conn, err error) (action Action) {
+	logging.Debugf("closing connection...")
+	return
+}
+
+func (t *testStopEngine) OnTraffic(c Conn) (action Action) {
+	buf, _ := c.Peek(-1)
+	_, _ = c.Write(buf)
+	_, _ = c.Discard(-1)
+	atomic.AddInt64(&t.exchngCount, 1)
+	return
+}
+
+func (t *testStopEngine) OnTick() (delay time.Duration, action Action) {
+	delay = time.Millisecond * 100
+	go func() {
+		conn, err := net.Dial(t.network, t.addr)
+		require.NoError(t.tester, err)
+		defer conn.Close()
+		data := []byte("Hello World! " + t.name)
+		_, _ = conn.Write(data)
+		_, err = conn.Read(data)
+		require.NoError(t.tester, err)
+
+		iter := atomic.LoadInt64(&t.stopIter)
+		if iter <= 0 {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			logging.Debugf("stop engine...", t.eng.Stop(ctx))
+			// waiting the engine shutdown.
+			_, err = conn.Read(data)
+			require.Error(t.tester, err)
+		}
+		atomic.AddInt64(&t.stopIter, -1)
+	}()
+	return
+}
+
+func testEngineStop(t *testing.T, network, addr string) {
+	events1 := &testStopEngine{tester: t, network: network, addr: addr, protoAddr: network + "://" + addr, name: "1", stopIter: 2}
+	events2 := &testStopEngine{tester: t, network: network, addr: addr, protoAddr: network + "://" + addr, name: "2", stopIter: 5}
+
+	result1 := make(chan error)
+	go func() {
+		err := Run(events1, events1.protoAddr, WithTicker(true), WithReuseAddr(true), WithReusePort(true))
+		result1 <- err
+	}()
+	// ensure the first handler processes before starting the next since the delay per tick is 100ms
+	time.Sleep(150 * time.Millisecond)
+	result2 := make(chan error)
+	go func() {
+		err := Run(events2, events2.protoAddr, WithTicker(true), WithReuseAddr(true), WithReusePort(true))
+		result2 <- err
+	}()
+
+	err := <-result1
+	assert.NoError(t, err)
+	err = <-result2
+	assert.NoError(t, err)
+	// make sure that each handler processed at least 1
+	require.Greater(t, events1.exchngCount, int64(0))
+	require.Greater(t, events2.exchngCount, int64(0))
+	require.Equal(t, int64(2+1+5+1), events1.exchngCount+events2.exchngCount)
+	// stop an already stopped engine
+	require.Equal(t, gerr.ErrEngineInShutdown, events1.eng.Stop(context.Background()))
+}
+
 // Test should not panic when we wake-up server_closed conn.
 func TestClosedWakeUp(t *testing.T) {
 	events := &testClosedWakeUpServer{
 		tester:             t,
-		BuiltinEventEngine: &BuiltinEventEngine{}, network: "tcp", addr: ":9998", protoAddr: "tcp://:9998",
+		BuiltinEventEngine: &BuiltinEventEngine{}, network: "tcp", addr: ":9999", protoAddr: "tcp://:9999",
 		clientClosed: make(chan struct{}),
 		serverClosed: make(chan struct{}),
 		wakeup:       make(chan struct{}),
