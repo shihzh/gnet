@@ -18,8 +18,10 @@
 package gnet
 
 import (
+	"fmt"
 	"math/rand"
 	"net"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -302,8 +304,11 @@ func testServeWithGnetClient(t *testing.T, network, addr string, reuseport, reus
 	)
 	assert.NoError(t, err)
 
-	err = ts.client.Start()
-	assert.NoError(t, err)
+	go func() {
+		err = ts.client.Start()
+		assert.NoError(t, err)
+	}()
+	runtime.Gosched()
 	defer ts.client.Stop() //nolint:errcheck
 
 	err = Run(ts,
@@ -383,4 +388,46 @@ func startGnetClient(t *testing.T, cli *Client, ev *clientEvents, network, addr 
 			)
 		}
 	}
+}
+
+func TestMutiCoreClient(t *testing.T) {
+
+	client, err := NewClient(
+		&clientEvents{packetLen: streamLen},
+		WithLogLevel(logging.DebugLevel),
+		WithLockOSThread(true),
+		WithTicker(true),
+		WithMulticore(true),
+		WithReuseAddr(true),
+		WithSocketSendBuffer(8000),
+		WithSocketRecvBuffer(9000),
+	)
+	assert.NoError(t, err)
+
+	go func() {
+		err = client.Start()
+		assert.NoError(t, err)
+	}()
+	runtime.Gosched()
+
+	var clients []Conn
+	for i := 0; i < 1000; i++ {
+		var dial Conn
+		dial, err = client.Dial("tcp", "192.168.27.181:5070")
+		assert.NoError(t, err)
+
+		err = dial.AsyncWrite([]byte("This is test"), func(c Conn, err error) error {
+			fmt.Println(i)
+			return nil
+		})
+		assert.NoError(t, err)
+
+		clients = append(clients, dial)
+	}
+	//
+	//err = dial.Close()
+	//assert.NoError(t, err)
+	time.Sleep(100 * time.Second)
+
+	defer client.Stop() //nolint:errcheck
 }

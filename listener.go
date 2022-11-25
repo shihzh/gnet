@@ -88,8 +88,8 @@ func initListener(network, addr string, options *Options) (l *listener, err erro
 		sockOpt := socket.Option{SetSockOpt: socket.SetReuseAddr, Opt: 1}
 		sockOpts = append(sockOpts, sockOpt)
 	}
-	if options.TCPNoDelay == TCPNoDelay && strings.HasPrefix(network, "tcp") {
-		sockOpt := socket.Option{SetSockOpt: socket.SetNoDelay, Opt: 1}
+	if options.TCPNoDelay == TCPDelay && strings.HasPrefix(network, "tcp") {
+		sockOpt := socket.Option{SetSockOpt: socket.SetNoDelay, Opt: 0}
 		sockOpts = append(sockOpts, sockOpt)
 	}
 	if options.SocketRecvBuffer > 0 {
@@ -98,6 +98,10 @@ func initListener(network, addr string, options *Options) (l *listener, err erro
 	}
 	if options.SocketSendBuffer > 0 {
 		sockOpt := socket.Option{SetSockOpt: socket.SetSendBuffer, Opt: options.SocketSendBuffer}
+		sockOpts = append(sockOpts, sockOpt)
+	}
+	if options.TCPLinger >= 0 {
+		sockOpt := socket.Option{SetSockOpt: socket.SetLinger, Opt: options.TCPLinger}
 		sockOpts = append(sockOpts, sockOpt)
 	}
 	if strings.HasPrefix(network, "udp") {

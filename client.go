@@ -20,14 +20,13 @@ package gnet
 import (
 	"context"
 	"errors"
+	"golang.org/x/sys/unix"
 	"net"
 	"strconv"
-	"sync"
+	"strings"
 	"syscall"
+	"time"
 
-	"golang.org/x/sys/unix"
-
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
 	"github.com/panjf2000/gnet/v2/internal/socket"
 	"github.com/panjf2000/gnet/v2/internal/toolkit"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/ring"
@@ -38,8 +37,38 @@ import (
 // Client of gnet.
 type Client struct {
 	opts     *Options
-	el       *eventloop
+	ev       *cliEventHandler
 	logFlush func() error
+}
+
+type cliEventHandler struct {
+	ev     EventHandler
+	engine Engine
+}
+
+func (ev *cliEventHandler) OnBoot(eng Engine) (action Action) {
+	ev.engine = eng
+	return ev.ev.OnBoot(eng)
+}
+
+func (ev *cliEventHandler) OnShutdown(eng Engine) {
+	ev.ev.OnShutdown(eng)
+}
+
+func (ev *cliEventHandler) OnOpen(c Conn) (out []byte, action Action) {
+	return ev.ev.OnOpen(c)
+}
+
+func (ev *cliEventHandler) OnClose(c Conn, err error) (action Action) {
+	return ev.ev.OnClose(c, err)
+}
+
+func (ev *cliEventHandler) OnTraffic(c Conn) (action Action) {
+	return ev.ev.OnTraffic(c)
+}
+
+func (ev *cliEventHandler) OnTick() (delay time.Duration, action Action) {
+	return ev.ev.OnTick()
 }
 
 // NewClient creates an instance of Client.
@@ -58,22 +87,16 @@ func NewClient(eventHandler EventHandler, opts ...Option) (cli *Client, err erro
 	if options.Logger == nil {
 		options.Logger = logger
 	}
-	var p *netpoll.Poller
-	if p, err = netpoll.OpenPoller(); err != nil {
-		return
+
+	// The maximum number of operating system threads that the Go program can use is initially set to 10000,
+	// which should also be the maximum amount of I/O event-loops locked to OS threads that users can start up.
+	if options.LockOSThread && options.NumEventLoop > 10000 {
+		logging.Errorf("too many event-loops under LockOSThread mode, should be less than 10,000 "+
+			"while you are trying to set up %d\n", options.NumEventLoop)
+		return nil, gerrors.ErrTooManyEventLoopThreads
 	}
-	eng := new(engine)
-	eng.opts = options
-	eng.eventHandler = eventHandler
-	eng.ln = &listener{network: "udp"}
-	eng.cond = sync.NewCond(&sync.Mutex{})
-	if options.Ticker {
-		eng.tickerCtx, eng.cancelTicker = context.WithCancel(context.Background())
-	}
-	el := new(eventloop)
-	el.ln = eng.ln
-	el.engine = eng
-	el.poller = p
+
+	cli.ev = &cliEventHandler{ev: eventHandler}
 
 	rbc := options.ReadBufferCap
 	switch {
@@ -94,49 +117,65 @@ func NewClient(eventHandler EventHandler, opts ...Option) (cli *Client, err erro
 		options.WriteBufferCap = toolkit.CeilToPowerOfTwo(wbc)
 	}
 
-	el.buffer = make([]byte, options.ReadBufferCap)
-	el.udpSockets = make(map[int]*conn)
-	el.connections = make(map[int]*conn)
-	el.eventHandler = eventHandler
-	cli.el = el
 	return
 }
 
 // Start starts the client event-loop, handing IO events.
-func (cli *Client) Start() error {
-	cli.el.eventHandler.OnBoot(Engine{})
-	cli.el.engine.wg.Add(1)
-	go func() {
-		cli.el.run(cli.opts.LockOSThread)
-		cli.el.engine.wg.Done()
-	}()
-	// Start the ticker.
-	if cli.opts.Ticker {
-		go cli.el.ticker(cli.el.engine.tickerCtx)
-	}
-	return nil
+func (cli *Client) Start() (err error) {
+	ln := &listener{network: "cli"}
+	return run(cli.ev, ln, cli.opts, "")
 }
 
 // Stop stops the client event-loop.
 func (cli *Client) Stop() (err error) {
-	logging.Error(cli.el.poller.UrgentTrigger(func(_ interface{}) error { return gerrors.ErrEngineShutdown }, nil))
-	cli.el.engine.wg.Wait()
-	logging.Error(cli.el.poller.Close())
-	cli.el.eventHandler.OnShutdown(Engine{})
-	// Stop the ticker.
-	if cli.opts.Ticker {
-		cli.el.engine.cancelTicker()
-	}
-	if cli.logFlush != nil {
-		err = cli.logFlush()
-	}
-	logging.Cleanup()
-	return
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	return cli.ev.engine.Stop(ctx)
 }
 
 // Dial is like net.Dial().
 func (cli *Client) Dial(network, address string) (Conn, error) {
-	c, err := net.Dial(network, address)
+	return cli.DialTimeout(network, address, "", 0)
+}
+
+// DialTimeout is like net.DialTimeout() with localAddr bind.
+func (cli *Client) DialTimeout(network, address, local string, timeout time.Duration) (Conn, error) {
+	var (
+		localAddr net.Addr
+		c         net.Conn
+		err       error
+	)
+	if local != "" {
+		if strings.HasPrefix(network, "udp") {
+			localAddr, err = net.ResolveUDPAddr(network, local)
+			if err != nil {
+				return nil, err
+			}
+		} else if strings.HasPrefix(network, "tcp") {
+			localAddr, err = net.ResolveTCPAddr(network, local)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	dialer := net.Dialer{Timeout: timeout, LocalAddr: localAddr,
+		Control: func(network, address string, c syscall.RawConn) (err error) {
+			var dupFD int
+			err = c.Control(func(fd uintptr) {
+				dupFD = int(fd)
+			})
+			if err != nil {
+				return
+			}
+			if cli.opts.ReuseAddr {
+				err = unix.SetsockoptInt(dupFD, unix.SOL_SOCKET, unix.SO_REUSEADDR, 1)
+			}
+			return
+		}}
+
+	c, err = dialer.Dial(network, address)
 	if err != nil {
 		return nil, err
 	}
@@ -167,20 +206,44 @@ func (cli *Client) Enroll(c net.Conn) (Conn, error) {
 		return nil, e
 	}
 
+	var sockOpts []socket.Option
+	if cli.opts.SocketRecvBuffer > 0 {
+		sockOpt := socket.Option{SetSockOpt: socket.SetRecvBuffer, Opt: cli.opts.SocketRecvBuffer}
+		sockOpts = append(sockOpts, sockOpt)
+	}
 	if cli.opts.SocketSendBuffer > 0 {
-		if err = socket.SetSendBuffer(dupFD, cli.opts.SocketSendBuffer); err != nil {
+		sockOpt := socket.Option{SetSockOpt: socket.SetSendBuffer, Opt: cli.opts.SocketSendBuffer}
+		sockOpts = append(sockOpts, sockOpt)
+	}
+	switch c.(type) {
+	case *net.TCPConn:
+		if cli.opts.TCPNoDelay == TCPDelay {
+			sockOpt := socket.Option{SetSockOpt: socket.SetNoDelay, Opt: 0}
+			sockOpts = append(sockOpts, sockOpt)
+		}
+		if cli.opts.TCPLinger >= 0 {
+			sockOpt := socket.Option{SetSockOpt: socket.SetLinger, Opt: cli.opts.TCPLinger}
+			sockOpts = append(sockOpts, sockOpt)
+		}
+		if cli.opts.TCPKeepAlive > 0 {
+			err = socket.SetKeepAlivePeriod(dupFD, int(cli.opts.TCPKeepAlive.Seconds()))
+		}
+	}
+
+	for _, sockOpt := range sockOpts {
+		if err = sockOpt.SetSockOpt(dupFD, sockOpt.Opt); err != nil {
 			return nil, err
 		}
 	}
-	if cli.opts.SocketRecvBuffer > 0 {
-		if err = socket.SetRecvBuffer(dupFD, cli.opts.SocketRecvBuffer); err != nil {
-			return nil, err
-		}
+
+	if cli.ev.engine.eng == nil {
+		return nil, gerrors.ErrEmptyEngine
 	}
 
 	var (
 		sockAddr unix.Sockaddr
 		gc       Conn
+		el       *eventloop
 	)
 	switch c.(type) {
 	case *net.UnixConn:
@@ -189,36 +252,24 @@ func (cli *Client) Enroll(c net.Conn) (Conn, error) {
 		}
 		ua := c.LocalAddr().(*net.UnixAddr)
 		ua.Name = c.RemoteAddr().String() + "." + strconv.Itoa(dupFD)
-		gc = newTCPConn(dupFD, cli.el, sockAddr, c.LocalAddr(), c.RemoteAddr())
+		el = cli.ev.engine.eng.lb.next(c.LocalAddr())
+		gc = newTCPConn(dupFD, el, sockAddr, c.LocalAddr(), c.RemoteAddr())
 	case *net.TCPConn:
-		if cli.opts.TCPNoDelay == TCPDelay {
-			if err = socket.SetNoDelay(dupFD, 0); err != nil {
-				return nil, err
-			}
-		}
-		if cli.opts.TCPLinger < 0 {
-			if err = socket.SetLinger(dupFD, cli.opts.TCPLinger); err != nil {
-				return nil, err
-			}
-		}
-		if cli.opts.TCPKeepAlive > 0 {
-			if err = socket.SetKeepAlivePeriod(dupFD, int(cli.opts.TCPKeepAlive.Seconds())); err != nil {
-				return nil, err
-			}
-		}
 		if sockAddr, _, _, _, err = socket.GetTCPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String()); err != nil {
 			return nil, err
 		}
-		gc = newTCPConn(dupFD, cli.el, sockAddr, c.LocalAddr(), c.RemoteAddr())
+		el = cli.ev.engine.eng.lb.next(c.LocalAddr())
+		gc = newTCPConn(dupFD, el, sockAddr, c.LocalAddr(), c.RemoteAddr())
 	case *net.UDPConn:
 		if sockAddr, _, _, _, err = socket.GetUDPSockAddr(c.RemoteAddr().Network(), c.RemoteAddr().String()); err != nil {
 			return nil, err
 		}
-		gc = newUDPConn(dupFD, cli.el, c.LocalAddr(), sockAddr, true)
+		el = cli.ev.engine.eng.lb.next(c.LocalAddr())
+		gc = newUDPConn(dupFD, el, c.LocalAddr(), sockAddr, true)
 	default:
 		return nil, gerrors.ErrUnsupportedProtocol
 	}
-	err = cli.el.poller.UrgentTrigger(cli.el.register, gc)
+	err = el.poller.UrgentTrigger(el.register, gc)
 	if err != nil {
 		gc.Close()
 		return nil, err

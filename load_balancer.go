@@ -17,6 +17,7 @@ package gnet
 import (
 	"hash/crc32"
 	"net"
+	"sync/atomic"
 
 	"github.com/panjf2000/gnet/v2/internal/toolkit"
 )
@@ -47,7 +48,7 @@ type (
 
 	// roundRobinLoadBalancer with Round-Robin algorithm.
 	roundRobinLoadBalancer struct {
-		nextLoopIndex int
+		nextLoopIndex int32
 		eventLoops    []*eventloop
 		size          int
 	}
@@ -75,11 +76,18 @@ func (lb *roundRobinLoadBalancer) register(el *eventloop) {
 
 // next returns the eligible event-loop based on Round-Robin algorithm.
 func (lb *roundRobinLoadBalancer) next(_ net.Addr) (el *eventloop) {
-	el = lb.eventLoops[lb.nextLoopIndex]
-	if lb.nextLoopIndex++; lb.nextLoopIndex >= lb.size {
-		lb.nextLoopIndex = 0
+	var index, next int32
+	for {
+		index = atomic.LoadInt32(&lb.nextLoopIndex)
+		next = index + 1
+		if next >= int32(lb.size) {
+			next = 0
+		}
+		if atomic.CompareAndSwapInt32(&lb.nextLoopIndex, index, next) {
+			el = lb.eventLoops[index]
+			return
+		}
 	}
-	return
 }
 
 func (lb *roundRobinLoadBalancer) iterate(f func(int, *eventloop) bool) {
@@ -163,5 +171,5 @@ func (lb *sourceAddrHashLoadBalancer) iterate(f func(int, *eventloop) bool) {
 }
 
 func (lb *sourceAddrHashLoadBalancer) len() int {
-	return lb.size
+	return int(lb.size)
 }

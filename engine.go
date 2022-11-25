@@ -99,7 +99,9 @@ func (eng *engine) activateEventLoops(numEventLoop int) (err error) {
 	// Create loops locally and bind the listeners.
 	for i := 0; i < numEventLoop; i++ {
 		if i > 0 {
-			if ln, err = initListener(network, address, eng.opts); err != nil {
+			if ln.network == "cli" {
+				ln = &listener{network: "cli"}
+			} else if ln, err = initListener(network, address, eng.opts); err != nil {
 				return
 			}
 		}
@@ -112,8 +114,10 @@ func (eng *engine) activateEventLoops(numEventLoop int) (err error) {
 			el.buffer = make([]byte, eng.opts.ReadBufferCap)
 			el.connections = make(map[int]*conn)
 			el.eventHandler = eng.eventHandler
-			if err = el.poller.AddRead(el.ln.packPollAttachment(el.accept)); err != nil {
-				return
+			if ln.network != "cli" {
+				if err = el.poller.AddRead(el.ln.packPollAttachment(el.accept)); err != nil {
+					return
+				}
 			}
 			eng.lb.register(el)
 
@@ -184,7 +188,7 @@ func (eng *engine) activateReactors(numEventLoop int) error {
 }
 
 func (eng *engine) start(numEventLoop int) error {
-	if eng.opts.ReusePort || eng.ln.network == "udp" {
+	if eng.opts.ReusePort || eng.ln.network == "udp" || eng.ln.network == "cli" {
 		return eng.activateEventLoops(numEventLoop)
 	}
 
