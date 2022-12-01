@@ -20,21 +20,18 @@ package gnet
 import (
 	"context"
 	"errors"
-	"golang.org/x/sys/unix"
 	"net"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"github.com/panjf2000/gnet/v2/internal/math"
-	"github.com/panjf2000/gnet/v2/internal/netpoll"
 	"github.com/panjf2000/gnet/v2/internal/socket"
 	"github.com/panjf2000/gnet/v2/pkg/buffer/ring"
 	gerrors "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
+	"golang.org/x/sys/unix"
 )
 
 // Client of gnet.
