@@ -34,6 +34,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 
 	gerr "github.com/panjf2000/gnet/v2/pkg/errors"
 	"github.com/panjf2000/gnet/v2/pkg/logging"
@@ -326,6 +327,24 @@ func (s *testServer) OnTraffic(c Conn) (action Action) {
 	}
 	buf, _ := c.Next(-1)
 	_, _ = c.Write(buf)
+
+	// Only for code coverage of testing.
+	if !s.multicore {
+		assert.NoErrorf(s.tester, c.Flush(), "flush error")
+		_ = c.Fd()
+		fd, err := c.Dup()
+		assert.NoError(s.tester, err)
+		assert.Greater(s.tester, fd, 0)
+		assert.NoErrorf(s.tester, unix.Close(fd), "close error")
+		assert.NoErrorf(s.tester, c.SetReadBuffer(streamLen), "set read buffer error")
+		assert.NoErrorf(s.tester, c.SetWriteBuffer(streamLen), "set write buffer error")
+		if s.network == "tcp" {
+			assert.NoErrorf(s.tester, c.SetLinger(1), "set linger error")
+			assert.NoErrorf(s.tester, c.SetNoDelay(false), "set no delay error")
+			assert.NoErrorf(s.tester, c.SetKeepAlivePeriod(time.Minute), "set keep alive period error")
+		}
+	}
+
 	return
 }
 
@@ -773,9 +792,13 @@ func (t *testCloseActionErrorServer) OnClose(c Conn, err error) (action Action) 
 
 func (t *testCloseActionErrorServer) OnTraffic(c Conn) (action Action) {
 	n := c.InboundBuffered()
-	buf, _ := c.Peek(n)
-	_, _ = c.Write(buf)
-	_, _ = c.Discard(n)
+	buf := make([]byte, n)
+	m, err := c.Read(buf)
+	assert.NoError(t.tester, err)
+	assert.EqualValuesf(t.tester, n, m, "read %d bytes, expected %d", m, n)
+	n, err = c.Write(buf)
+	assert.NoError(t.tester, err)
+	assert.EqualValuesf(t.tester, m, n, "wrote %d bytes, expected %d", n, m)
 	action = Close
 	return
 }
@@ -1001,7 +1024,10 @@ func (t *testCloseConnectionServer) OnTraffic(c Conn) (action Action) {
 	_, _ = c.Discard(-1)
 	go func() {
 		time.Sleep(time.Second)
-		_ = c.Close()
+		_ = c.CloseWithCallback(func(c Conn, err error) error {
+			assert.ErrorIsf(t.tester, err, gerr.ErrEngineShutdown, "should be engine shutdown error")
+			return nil
+		})
 	}()
 	return
 }
@@ -1427,14 +1453,17 @@ func TestSimServer(t *testing.T) {
 	t.Run("packet-size=1024,batch=20", func(t *testing.T) {
 		testSimServer(t, ":7203", 10, 1024, 20)
 	})
-	t.Run("packet-size=64*1024,batch=5", func(t *testing.T) {
-		testSimServer(t, ":7204", 10, 64*1024, 5)
+	t.Run("packet-size=64*1024,batch=10", func(t *testing.T) {
+		testSimServer(t, ":7204", 10, 64*1024, 10)
 	})
-	t.Run("packet-size=128*1024,batch=3", func(t *testing.T) {
-		testSimServer(t, ":7205", 10, 128*1024, 3)
+	t.Run("packet-size=128*1024,batch=5", func(t *testing.T) {
+		testSimServer(t, ":7205", 10, 128*1024, 5)
 	})
-	t.Run("packet-size=1024*1024,batch=1", func(t *testing.T) {
-		testSimServer(t, ":7206", 10, 1024*1024, 1)
+	t.Run("packet-size=512*1024,batch=3", func(t *testing.T) {
+		testSimServer(t, ":7206", 10, 512*1024, 3)
+	})
+	t.Run("packet-size=1024*1024,batch=2", func(t *testing.T) {
+		testSimServer(t, ":7207", 10, 1024*1024, 2)
 	})
 }
 
