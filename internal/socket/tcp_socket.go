@@ -65,11 +65,11 @@ func determineTCPProto(proto string, addr *net.TCPAddr) (string, error) {
 	// version from the size of the resolved IP address. Otherwise, we simple use
 	// the protocol given to us by the caller.
 
-	if addr.IP.To4() != nil {
+	if proto == "tcp4" && addr.IP.To4() != nil {
 		return "tcp4", nil
 	}
 
-	if addr.IP.To16() != nil {
+	if proto == "tcp6" && addr.IP.To16() != nil {
 		return "tcp6", nil
 	}
 
