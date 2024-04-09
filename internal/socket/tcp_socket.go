@@ -75,7 +75,7 @@ func determineTCPProto(proto string, addr *net.TCPAddr) (string, error) {
 
 	switch proto {
 	case "tcp", "tcp4", "tcp6":
-		return proto, nil
+		return "tcp", nil
 	}
 
 	return "", errors.ErrUnsupportedTCPProtocol

@@ -34,6 +34,7 @@ import (
 type listener struct {
 	once             sync.Once
 	fd               int
+	client	         bool
 	addr             net.Addr
 	address, network string
 	sockOpts         []socket.Option

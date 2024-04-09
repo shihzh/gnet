@@ -121,8 +121,8 @@ func NewClient(eventHandler EventHandler, opts ...Option) (cli *Client, err erro
 }
 
 // Start starts the client event-loop, handing IO events.
-func (cli *Client) Start() (err error) {
-	ln := &listener{network: "cli"}
+func (cli *Client) Start(network string) (err error) {
+	ln := &listener{network: network, client: true}
 	return run(cli.ev, ln, cli.opts, "")
 }
 

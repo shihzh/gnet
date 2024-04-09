@@ -63,17 +63,17 @@ func determineUDPProto(proto string, addr *net.UDPAddr) (string, error) {
 	// version from the size of the resolved IP address. Otherwise, we simple use
 	// the protocol given to us by the caller.
 
-	if addr.IP.To4() != nil {
+	if proto == "udp4" && addr.IP.To4() != nil {
 		return "udp4", nil
 	}
 
-	if addr.IP.To16() != nil {
+	if proto == "udp6" && addr.IP.To16() != nil {
 		return "udp6", nil
 	}
 
 	switch proto {
 	case "udp", "udp4", "udp6":
-		return proto, nil
+		return "udp", nil
 	}
 
 	return "", errors.ErrUnsupportedUDPProtocol
