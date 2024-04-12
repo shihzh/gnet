@@ -83,6 +83,7 @@ func (el *eventloop) register(itf interface{}) error {
 			return err
 		}
 		el.udpSockets[c.fd] = c
+		el.addConn(1)
 		return nil
 	}
 	if err := el.poller.AddRead(c.pollAttachment); err != nil {
@@ -180,6 +181,7 @@ func (el *eventloop) closeConn(c *conn, err error) (rerr error) {
 		if c.fd != el.ln.fd {
 			rerr = unix.Close(c.fd)
 			delete(el.udpSockets, c.fd)
+			el.addConn(-1)
 		}
 		if el.eventHandler.OnClose(c, err) == Shutdown {
 			return gerrors.ErrEngineShutdown
