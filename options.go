@@ -44,9 +44,6 @@ const (
 type Options struct {
 	// ================================== Options for only server-side ==================================
 
-	// NoBlock indicates whether the run function will be blocked.
-	NoBlock bool
-
 	// Multicore indicates whether the engine will be effectively created with multi-cores, if so,
 	// then you must take care with synchronizing memory between all event callbacks, otherwise,
 	// it will run the engine with single thread. The number of threads in the engine will be automatically
@@ -145,13 +142,6 @@ type Options struct {
 func WithOptions(options Options) Option {
 	return func(opts *Options) {
 		*opts = options
-	}
-}
-
-// WithNoBlock sets up noblock fo run function in gnet engine.
-func WithNoBlock(noBlock bool) Option {
-	return func(opts *Options) {
-		opts.NoBlock = noBlock
 	}
 }
 

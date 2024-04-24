@@ -281,7 +281,7 @@ func run(eventHandler EventHandler, listener *listener, options *Options, protoA
 		return err
 	}
 	defer func() {
-		if options.NoBlock {
+		if listener.client {
 			go func() {
 				eng.stop(e)
 			}()
