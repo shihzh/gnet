@@ -280,7 +280,15 @@ func run(eventHandler EventHandler, listener *listener, options *Options, protoA
 		eng.opts.Logger.Errorf("gnet engine is stopping with error: %v", err)
 		return err
 	}
-	defer eng.stop(e)
+	defer func() {
+		if options.NoBlock {
+			go func() {
+				eng.stop(e)
+			}()
+		} else {
+			eng.stop(e)
+		}
+	}()
 
 	allEngines.Store(protoAddr, eng)
 
