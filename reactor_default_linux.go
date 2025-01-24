@@ -32,7 +32,10 @@ func (el *eventloop) activateMainReactor(lockOSThread bool) {
 
 	defer el.engine.signalShutdown()
 
-	err := el.poller.Polling(func(fd int, ev uint32) error { return el.engine.accept(fd, ev) })
+	err := el.poller.Polling(func(fd int, ev uint32) error {
+		el.engine.accept(fd, ev)
+		return nil
+	})
 	if err == errors.ErrEngineShutdown {
 		el.engine.opts.Logger.Debugf("main reactor is exiting in terms of the demand from user, %v", err)
 	} else if err != nil {

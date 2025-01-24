@@ -139,7 +139,7 @@ func (p *Poller) Polling(callback func(fd int, ev uint32) error) error {
 			if fd := int(ev.Fd); fd != p.efd {
 				switch err = callback(fd, ev.Events); err {
 				case nil:
-				case errors.ErrAcceptSocket, errors.ErrEngineShutdown:
+				case errors.ErrEngineShutdown:
 					return err
 				default:
 					logging.Warnf("error occurs in event-loop: %v", err)
